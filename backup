@@ -1,0 +1,420 @@
+#/bin/bash
+########################################################################
+#                                                                      #
+# backup                                                               #
+# Automate rotating rsync backups                                      #
+#                                                                      #
+# Credit to Mike Rubel for describing the process.                     #
+# http://www.mikerubel.org/computers/rsync_snapshots/                  #
+#                                                                      #
+# The process in this script differers from most rotating rsync        #
+# scripts because it makes no attempt to rotate checkpoints in a       #
+# hierarchal manner. Simply if the most recent checkpoint of a type is #
+# older than expected, the checkpoints are rotated and a new one is    #
+# created.                                                             #
+#                                                                      #
+########################################################################
+OK=YES
+CONFIG='/etc/backup.conf'
+
+if [ -f "${CONFIG}" ]; then
+    . "${CONFIG}"
+else
+    echo "**** BACKUP CONFIGURATION FILE MISSING (${CONFIG}) ****" 1>&2
+    echo '' 1>&2
+    OK=NO
+fi;
+
+[[ -v INSTANT ]] || INSTANT=24
+[[ -v DAILY   ]] || DAILY=7
+[[ -v WEEKLY  ]] || WEEKLY=4
+[[ -v MONTHLY ]] || MONTHLY=12
+[[ -v YEARLY  ]] || YEARLY=3
+
+if ! [[ -v DEVICE ]]; then
+    DEVICE=''
+    echo '**** DEVICE IS NOT IS NOT CONFIGURED ****' 1>&2
+    echo 'EXAMPLE:' 1>&2
+    echo "DEVICE='/dev/disk/by-partlabel/rsnapshot'"
+    echo '' 1>&2
+    OK=NO
+fi
+
+if ! [[ -v MOUNT ]]; then
+    MOUNT=''
+    echo '**** MOUNT IS NOT IS NOT CONFIGURED ****' 1>&2
+    echo 'EXAMPLE:' 1>&2
+    echo "MOUNT='/var/local/backup'"
+    echo '' 1>&2
+    OK=NO
+fi
+
+if ! [[ -v ROOT ]]; then
+    ROOT=''
+    echo '**** ROOT IS NOT IS NOT CONFIGURED ****' 1>&2
+    echo 'EXAMPLE:' 1>&2
+    echo 'ROOT="${MOUNT}/`hostname`"'
+    echo '' 1>&2
+    OK=NO
+fi
+
+if ! [[ -v HEAD ]]; then
+    HEAD=''
+    echo '**** HEAD IS NOT IS NOT CONFIGURED ****' 1>&2
+    echo 'EXAMPLE:' 1>&2
+    echo 'HEAD="${ROOT}/head"'
+    echo '' 1>&2
+    OK=NO
+fi
+
+if ! [[ -v RSYNC ]]; then
+    RSYNC[0]=''
+    echo '**** RSYNC ARRAY IS NOT IS NOT CONFIGURED ****' 1>&2
+    echo 'EXAMPLE:' 1>&2
+    echo '#'
+    echo '# Remember, you probably do not want to use a trailing slash on the'
+    echo '# rsync source path. Read the rsync documentation to understand why.'
+    echo '#'
+    echo 'RSYNC=(' 1>&2
+    echo '    "rsync -a --delete --numeric-ids --relative --delete-excluded --hard-links /etc  ${HEAD}"' 1>&2
+    echo '    "rsync -a --delete --numeric-ids --relative --delete-excluded --hard-links /home ${HEAD}"' 1>&2
+    echo ')' 1>&2
+    echo '' 1>&2
+    OK=NO
+fi
+
+
+[[ -v DEVICE_REAL ]] || DEVICE_REAL=`readlink -f "${DEVICE}"`
+
+########################################################################
+fnConfig() {
+    echo "INSTANT : ${INSTANT}"
+    echo "DAILY   : ${DAILY}"
+    echo "WEEKLY  : ${WEEKLY}"
+    echo "MONTHLY : ${MONTHLY}"
+    echo "YEARLY  : ${YEARLY}"
+    echo "DEVICE  : ${DEVICE} (${DEVICE_REAL})"
+    echo "MOUNT   : ${MOUNT}"
+    echo "ROOT    : ${ROOT}"
+    echo "HEAD    : ${HEAD}"
+}
+
+fnHelp() {
+    echo "${0} is a shell script that automates backups with rsync"
+    echo 'The following options are available:'
+    echo '  help              Show this message'
+    echo '  start             Backup the filesystem'
+    echo '  config            Show the current configuration'
+    echo '  df                Display disk usage on backup device'
+    echo '  du                Display space consumed by backups'
+    echo '  diff              Dry-run with verbose output'
+    echo '  mount [dir [rw]]  Mount the backup device'
+    echo '  umount            Unmount the backup device'
+}
+
+fnIsAvailable() {
+    test -b "${1}"
+    return $?
+}
+
+fnIsMounted() {
+    grep -qs "^$1 " /proc/mounts;
+    return $?
+}
+
+fnMount() {
+    local RESULT
+    local MNT
+    local OPT
+    if [ "$1" = "" ]; then
+        MNT="${MOUNT}"
+        OPT="rw"
+    else
+        MNT="${1}"
+        OPT="ro"
+
+        if [ "${2}" = "rw" ]; then
+            OPT="rw"
+        fi
+    fi
+
+    if ! fnIsAvailable "${DEVICE_REAL}"; then
+        echo "**** ${DEVICE} IS NOT AVAILABLE ****" 1>&2
+        RESULT=1
+    elif fnIsMounted "${DEVICE_REAL}"; then
+        echo "**** ${DEVICE} IS ALREADY MOUNTED ****" 1>&2
+        RESULT=1
+    elif [ ! -d "${MNT}" ]; then
+        echo "**** ${MNT} DOES NOT EXIST ****" 1>&2
+        RESULT=1
+    else
+        echo "mount -o ${OPT} ${DEVICE_REAL} ${MNT}"
+        mount -o "${OPT}" "${DEVICE_REAL}" "${MNT}"
+        RESULT=$?
+    fi
+    return "${RESULT}"
+}
+
+fnUmount() {
+    if ! fnIsMounted "${DEVICE_REAL}"; then
+        echo "**** ${DEVICE} IS NOT MOUNTED ****" 1>&2
+        return 1
+    else
+        echo "umount ${DEVICE_REAL}"
+        umount "${DEVICE_REAL}"
+        if [ "$?" -ne "0" ]; then
+            echo '**** ERROR UNMOUNTING ${DEVICE} ****' 1>&2
+            return 1
+        else
+            return 0
+        fi
+    fi
+}
+
+fnDf() {
+    local RESULT
+    if ! fnMount "${MOUNT}" ro; then
+        RESULT=1
+    else
+        echo "df -h ${DEVICE_REAL}"
+        df -h "${DEVICE_REAL}"
+        RESULT=$?
+
+        if ! fnUmount; then
+            RESULT=1
+        fi
+    fi;
+    return "${RESULT}"
+}
+
+fnDu() {
+    local RESULT
+    if ! fnMount "${MOUNT}" ro; then
+        RESULT=1
+    else
+        echo 'du -shc'
+        (
+            find "${ROOT}" -maxdepth 1 -type d -name "head"      -print 2>/dev/null
+            find "${ROOT}" -maxdepth 1 -type d -name "instant.*" -print 2>/dev/null |sort
+            find "${ROOT}" -maxdepth 1 -type d -name "daily.*"   -print 2>/dev/null |sort
+            find "${ROOT}" -maxdepth 1 -type d -name "weekly.*"  -print 2>/dev/null |sort
+            find "${ROOT}" -maxdepth 1 -type d -name "monthly.*" -print 2>/dev/null |sort
+            find "${ROOT}" -maxdepth 1 -type d -name "yearly.*"  -print 2>/dev/null |sort
+        ) |xargs du -shc
+        RESULT=$?
+
+        if ! fnUmount; then
+            RESULT=1
+        fi
+    fi;
+    return "${RESULT}"
+}
+
+fnDiff() {
+    local RESULT=0
+    local CMD
+
+    if ! [[ -v DIFF ]]; then
+        local N=0
+        for CMD in "${RSYNC[@]}"; do
+            DIFF["${N}"]=`echo "${CMD}" |sed 's/rsync /rsync -n -v /'`
+            N=`expr ${N} + 1`
+        done
+    fi
+
+    if ! fnMount "${MOUNT}" ro; then
+        RESULT=1
+    else
+        for CMD in "${DIFF[@]}"; do
+            echo "${CMD}"
+            $CMD
+            if [ "$?" -ne "0" ]; then
+                RESULT=1
+            fi
+        done
+
+        if ! fnUmount; then
+            RESULT=1
+        fi
+    fi;
+    return "${RESULT}"
+}
+
+fnRotate() {
+    local RPATH="${1}"
+    local CNAME="${2}"
+    local N="${3}"
+
+    local BASE="${RPATH}/${CNAME}"
+    local NEW
+    local OLD
+
+    while [ "${N}" -gt "1" ]; do
+        local NEW="${BASE}.`printf '%02d' ${N}`"
+        N=`expr ${N} - 1`
+        local OLD="${BASE}.`printf '%02d' ${N}`"
+
+        if [ -d "${NEW}" ]; then
+            echo "rm -rf ${NEW}"
+            rm -rf "${NEW}"
+            if [ "$?" -ne "0" ]; then
+                echo '**** ERROR REMOVING DIRECTORY ****' 1>&2
+                return 1
+            fi
+        fi
+
+        if [ -d "${OLD}" ]; then
+            echo "mv -f ${OLD} ${NEW}"
+            mv -f "${OLD}" "${NEW}"
+            if [ "$?" -ne "0" ]; then
+                echo '**** ERROR MOVING DIRECTORY ****' 1>&2
+                return 1
+            fi
+        fi
+    done
+}
+
+fnMkCheckpoint() {
+    local PTNAME="${1}"
+    local PTCNT="${2}"
+
+    fnRotate "${ROOT}" "${PTNAME}"  "${PTCNT}"
+    echo "cp -al ${HEAD} ${ROOT}/${PTNAME}.01"
+    cp -al "${HEAD}" "${ROOT}/${PTNAME}.01"
+}
+
+fnStart() {
+    local RESULT="0";
+    if [ ! -d "${MOUNT}" ]; then
+        echo "**** MOUNT POINT NOT FOUND ${MOUNT} ****" 1>&2
+        RESULT=1
+    else
+        if ! fnIsAvailable "${DEVICE_REAL}"; then
+            echo "**** ${DEVICE} IS NOT AVAILABLE ****" 1>&2
+            RESULT=1
+        else
+            if fnIsMounted "${DEVICE_REAL}"; then
+                echo "**** ${DEVICE} IS ALREADY MOUNTED ****" 1>&2
+                RESULT=1
+            else
+                fnMount
+                if [ "$?" -ne "0" ]; then
+                    echo '**** ERROR MOUNTING ${DEVICE} ****' 1>&2
+                    RESULT=1
+                else
+                    if [ ! -d "${ROOT}" ]; then
+                        echo "**** BACKUP ROOT NOT FOUND ${ROOT} ****" 1>&2
+                        RESULT=1
+                    else
+
+                        local D=`find "${ROOT}" -maxdepth 1 -name daily.01   -type d -mmin  +1430 2>/dev/null`
+                        local W=`find "${ROOT}" -maxdepth 1 -name weekly.01  -type d -mtime +6    2>/dev/null`
+                        local M=`find "${ROOT}" -maxdepth 1 -name monthly.01 -type d -mtime +29   2>/dev/null`
+                        local Y=`find "${ROOT}" -maxdepth 1 -name yearly.01  -type d -mtime +364  2>/dev/null`
+
+                        if [ ! -d "${HEAD}" ]; then
+                            echo "mkdir -m 0755 -p ${HEAD}"
+                            mkdir -m 0755 -p "${HEAD}"
+                        fi
+
+                        echo "-- RUNNING BACKUP COMMANDS --"
+                        local CMD
+                        for CMD in "${RSYNC[@]}"; do
+                            echo "${CMD}"
+                            $CMD
+                            if [ "$?" -ne "0" ]; then
+                                RESULT=1
+                            fi
+                        done
+
+                        if [ "${RESULT}" -ne "0" ]; then
+                            echo '**** ERROR RUNNING BACKUP ****' 1>&2
+                            RESULT=1
+                        else
+                            echo "touch ${HEAD}"
+                            touch "${HEAD}"
+
+                            echo "-- CREATE INSTANT CHECKPOINT --"
+                            fnMkCheckpoint instant "${INSTANT}"
+
+                            if [ ! -d "${ROOT}/daily.01" -o -n "${D}" ]; then 
+                                echo "-- CREATE DAILY CHECKPOINT --"
+                                fnMkCheckpoint daily "${DAILY}"
+                            fi
+
+                            if [ ! -d "${ROOT}/weekly.01" -o -n "${W}" ]; then 
+                                echo "-- CREATE WEEKLY CHECKPOINT --"
+                                fnMkCheckpoint weekly "${WEEKLY}"
+                            fi
+
+                            if [ ! -d "${ROOT}/monthly.01" -o -n "${M}" ]; then 
+                                echo "-- CREATE MONTHLY CHECKPOINT --"
+                                fnMkCheckpoint monthly "${MONTHLY}"
+                            fi
+
+                            if [ ! -d "${ROOT}/yearly.01" -o -n "${Y}" ]; then 
+                                echo "-- CREATE YEARLY CHECKPOINT --"
+                                fnMkCheckpoint yearly "${YEARLY}"
+                            fi
+
+                            RESULT=$?
+                        fi
+                    fi
+
+                    echo 'sync; sync;'
+                    sync; sync;
+                    if ! fnUmount; then
+                        RESULT=1
+                    fi
+                fi
+            fi
+        fi
+    fi
+    return "${RESULT}"
+}
+
+########################################################################
+
+if [ "${OK}" != "YES" ]; then
+    fnConfig
+    exit 1
+fi
+
+case "$1" in
+    start)
+        fnStart
+        exit $?
+        ;;
+    help)
+        fnHelp
+        exit 0;
+        ;;
+    config)
+        fnConfig
+        exit 0
+        ;;
+    df)
+        fnDf
+        exit $?
+        ;;
+    du)
+        fnDu
+        exit $?
+        ;;
+    diff)
+        fnDiff
+        exit $?
+        ;;
+    mount)
+        fnMount "${2}" "${3}"
+        exit $?
+        ;;
+    umount)
+        fnUmount
+        exit $?
+        ;;
+    *)
+        fnHelp
+        exit 1
+        ;;
+esac
