@@ -1,2 +1,3 @@
 # backup
-Rsync based backup suitable for home computers
+Automate rotating rsync backups to offline devices.
+This is an easy to use solution for linux home computers.
