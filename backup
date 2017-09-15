@@ -28,6 +28,7 @@ else
     OK=NO
 fi
 
+[[ -v COMMENT ]] || COMMENT=''
 [[ -v INSTANT ]] || INSTANT=24
 [[ -v DAILY   ]] || DAILY=7
 [[ -v WEEKLY  ]] || WEEKLY=4
@@ -82,6 +83,7 @@ fi
 
 ########################################################################
 fnConfig() {
+    echo "COMMENT : ${COMMENT}"
     echo "INSTANT : ${INSTANT}"
     echo "DAILY   : ${DAILY}"
     echo "WEEKLY  : ${WEEKLY}"
@@ -379,6 +381,32 @@ fnStart() {
     return "${RESULT}"
 }
 
+fnDashes() {
+    local LEN="${1}"
+    printf '%*s' ${LEN} |tr ' ' '-'
+}
+
+fnSpaces() {
+    local LEN="${1}"
+    printf '%*s' ${LEN}
+}
+
+fnPrintComment() {
+    if [[ -n "${COMMENT}" ]]; then
+        local C=80
+        local S=''
+        local D=`fnDashes "${#COMMENT}"`
+
+        #if [[ ${C} -gt ${#COMMENT} ]]; then
+        #    S=`fnSpaces $(( ( ${C} - ${#COMMENT} ) / 2 ))`
+        #fi
+
+        echo "${S}${D}"
+        echo "${S}${COMMENT}"
+        echo "${S}${D}"
+    fi
+}
+
 ########################################################################
 
 if [[ "${OK}" != "YES" ]]; then
@@ -388,6 +416,7 @@ fi
 
 case "$1" in
     start)
+        fnPrintComment
         fnStart
         exit $?
         ;;
@@ -400,26 +429,32 @@ case "$1" in
         exit 0
         ;;
     df)
+        fnPrintComment
         fnDf
         exit $?
         ;;
     du)
+        fnPrintComment
         fnDu
         exit $?
         ;;
     diff)
+        fnPrintComment
         fnDiff
         exit $?
         ;;
     ls)
+        fnPrintComment
         fnLs
         exit $?
         ;;
     mount)
+        fnPrintComment
         fnMount "${2}" "${3}"
         exit $?
         ;;
     umount)
+        fnPrintComment
         fnUmount
         exit $?
         ;;
